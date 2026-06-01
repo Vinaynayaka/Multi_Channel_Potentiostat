@@ -1,109 +1,103 @@
 /*
-  potentiostat_cv.ino
-  
+  ArduinoMega_DAC_MCP4921.ino
+  ============================
   JUAMI Potentiostat - Arduino Mega
-  ----------------------------------
-  - Receives DAC setpoints from Python over Serial
-  - Writes voltage to MCP4921 DAC via SPI
-  - Reads RE voltage (A0) and TIA current voltage (A2)
-  - Streams readings back to Python as CSV: "voltage_raw,current_raw\n"
+  
+  Protocol:
+    - Python sends a physical voltage as a float string e.g. "3.0000\n"
+    - Arduino writes that voltage to MCP4921 DAC via SPI
+    - Arduino reads A0 (RE voltage) and A2 (TIA current voltage)
+    - Arduino sends back one CSV line: "timestamp,setpoint,vA0,vA2\n"
 
-  Virtual Ground: 2.5V
-  DAC: MCP4921 (12-bit, SPI)
-  ADC: Arduino Mega built-in (10-bit, 0-5V)
+  Virtual Ground: 2.5V physical = 0V electrochemical
+  DAC: MCP4921 12-bit, SPI
+  ADC: Arduino Mega built-in 10-bit (0-5V)
 
   Wiring:
     MCP4921 CS  -> Pin 10
-    MCP4921 SCK -> Pin 52 (SPI SCK)
-    MCP4921 SDI -> Pin 51 (SPI MOSI)
+    MCP4921 SCK -> Pin 52 (SPI SCK on Mega)
+    MCP4921 SDI -> Pin 51 (SPI MOSI on Mega)
     RE buffer output -> A0
     TIA output       -> A2
 */
 
 #include <SPI.h>
 
-// MCP4921 Chip Select pin
-#define DAC_CS_PIN 10
-
-// Commands from Python (single byte)
-#define CMD_SET_DAC   0x01   // followed by 2 bytes: high_byte, low_byte (12-bit value)
-#define CMD_READ_ADC  0x02   // Arduino reads A0 and A2, sends back two 16-bit integers
+const int CS_PIN  = 10;
+const float V_REF = 5.0;
 
 void setup() {
   Serial.begin(115200);
-  
-  // SPI setup for MCP4921
+
   SPI.begin();
-  SPI.setDataMode(SPI_MODE0);
-  SPI.setBitOrder(MSBFIRST);
-  SPI.setClockDivider(SPI_CLOCK_DIV16); // 1 MHz SPI clock
-  
-  pinMode(DAC_CS_PIN, OUTPUT);
-  digitalWrite(DAC_CS_PIN, HIGH); // deselect DAC
-  
-  // Set DAC to virtual ground (midpoint = 2048) at startup
-  write_dac(2048);
-  
-  // Configure ADC
-  analogReference(DEFAULT); // 5V reference
+  pinMode(CS_PIN, OUTPUT);
+  digitalWrite(CS_PIN, HIGH);
+
+  // Set DAC to virtual ground (2.5V) at startup
+  writeDAC(2.5);
+
+  // Handshake — Python waits for this before proceeding
+  Serial.println("READY");
 }
 
 void loop() {
-  if (Serial.available() >= 1) {
-    byte cmd = Serial.read();
+  if (Serial.available()) {
+    // Read the voltage string sent by Python e.g. "3.0000\n"
+    float v = Serial.parseFloat();
 
-    if (cmd == CMD_SET_DAC) {
-      // Wait for 2 bytes: high byte then low byte of 12-bit DAC value
-      while (Serial.available() < 2);
-      byte high_byte = Serial.read();
-      byte low_byte  = Serial.read();
-      uint16_t dac_value = ((uint16_t)high_byte << 8) | low_byte;
-      dac_value = constrain(dac_value, 0, 4095);
-      write_dac(dac_value);
+    // Clamp to valid range
+    if (v < 0.0) v = 0.0;
+    if (v > V_REF) v = V_REF;
+
+    // Write to DAC
+    writeDAC(v);
+
+    // Small settle time before reading
+    delay(5);
+
+    // Read A0 and A2, average 16 readings each to reduce noise
+    long a0_sum = 0;
+    long a2_sum = 0;
+    for (int i = 0; i < 16; i++) {
+      a0_sum += analogRead(A0);
+      a2_sum += analogRead(A2);
+      delayMicroseconds(200);
     }
+    float vA0 = (a0_sum / 16.0) * (V_REF / 1023.0);
+    float vA2 = (a2_sum / 16.0) * (V_REF / 1023.0);
 
-    else if (cmd == CMD_READ_ADC) {
-      // Read A0 (RE voltage) and A2 (TIA / current voltage)
-      // Average 8 readings to reduce noise
-      long a0_sum = 0;
-      long a2_sum = 0;
-      for (int i = 0; i < 8; i++) {
-        a0_sum += analogRead(A0);
-        a2_sum += analogRead(A2);
-        delayMicroseconds(200);
-      }
-      uint16_t a0_avg = a0_sum / 8;
-      uint16_t a2_avg = a2_sum / 8;
+    unsigned long t = millis();
 
-      // Send back as 4 bytes: A0 high, A0 low, A2 high, A2 low
-      Serial.write((a0_avg >> 8) & 0xFF);
-      Serial.write(a0_avg & 0xFF);
-      Serial.write((a2_avg >> 8) & 0xFF);
-      Serial.write(a2_avg & 0xFF);
-    }
+    // Send back: timestamp, setpoint, vA0, vA2
+    Serial.print(t);
+    Serial.print(",");
+    Serial.print(v, 4);
+    Serial.print(",");
+    Serial.print(vA0, 4);
+    Serial.print(",");
+    Serial.println(vA2, 4);
   }
 }
 
 /*
-  write_dac()
-  Sends a 12-bit value to the MCP4921 DAC via SPI.
-  
-  MCP4921 16-bit write format:
-  Bit 15: 0 = channel A (only channel on MCP4921)
-  Bit 14: 0 = unbuffered VREF
-  Bit 13: 1 = 1x gain  (output = VREF * D/4096, VREF = 5V)
-  Bit 12: 1 = DAC active (SHDN = 1)
-  Bits 11-0: 12-bit data
-*/
-void write_dac(uint16_t value) {
-  uint16_t spi_data = 0x3000 | (value & 0x0FFF);
-  // 0x3000 = 0011 0000 0000 0000
-  //           ││
-  //           │└── BUF=0 (unbuffered), GA=1 (1x gain), SHDN=1 (active)
-  //           └─── A/B=0 (channel A)
+  writeDAC()
+  ----------
+  Sends a physical voltage (0-5V) to the MCP4921 DAC via SPI.
 
-  digitalWrite(DAC_CS_PIN, LOW);
-  SPI.transfer((spi_data >> 8) & 0xFF); // high byte
-  SPI.transfer(spi_data & 0xFF);        // low byte
-  digitalWrite(DAC_CS_PIN, HIGH);
+  MCP4921 16-bit write format:
+    Bit 15   : 0 = Channel A
+    Bit 14   : 0 = Unbuffered VREF
+    Bit 13   : 1 = 1x gain (output = VREF x D/4096)
+    Bit 12   : 1 = DAC active
+    Bits 11-0: 12-bit data value
+*/
+void writeDAC(float voltage) {
+  uint16_t dacValue = (uint16_t)((voltage / V_REF) * 4095);
+  dacValue = constrain(dacValue, 0, 4095);
+
+  uint16_t command = 0x3000 | (dacValue & 0x0FFF);
+
+  digitalWrite(CS_PIN, LOW);
+  SPI.transfer16(command);
+  digitalWrite(CS_PIN, HIGH);
 }

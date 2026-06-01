@@ -1,0 +1,11 @@
+Experiment: CV
+Date          : 29-05-2026
+Time          : 17:37:15
+Start Voltage : 0.5 V
+Vertex 1      : 1.0 V
+Vertex 2      : 0 V
+End Voltage   : 0.5 V
+Sweep Rate    : 50 mV/s
+Cycles        : 2
+Rest Time     : 2.0 s
+Steps per Volt: 100
