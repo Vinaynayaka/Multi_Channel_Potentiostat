@@ -1,0 +1,16 @@
+# Raspberry Pi Potentiostat — Python Dependencies
+# Install with: pip install -r requirements.txt
+
+# Hardware
+RPi.GPIO
+spidev
+adafruit-circuitpython-ads1x15
+adafruit-blinka
+
+# Experiment & plotting
+numpy
+matplotlib
+pyserial
+
+# Config
+pyyaml
