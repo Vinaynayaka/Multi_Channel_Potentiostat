@@ -1,0 +1,8 @@
+Experiment: LSV
+Date          : 02-06-2026
+Time          : 13:51:05
+Start Voltage : 0.0 V
+End Voltage   : 1.0 V
+Sweep Rate    : 100 mV/s
+Rest Time     : 2.0 s
+Steps per Volt: 150

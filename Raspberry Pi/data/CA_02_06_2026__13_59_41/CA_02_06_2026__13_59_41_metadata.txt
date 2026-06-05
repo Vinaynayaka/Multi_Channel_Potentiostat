@@ -1,0 +1,7 @@
+Experiment: CA
+Date        : 02-06-2026
+Time        : 13:59:41
+Voltage     : 1 V
+Duration    : 30 s
+Rest Time   : 2.0 s
+Data Points : 150
