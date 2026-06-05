@@ -23,12 +23,7 @@ import csv
 import os
 from datetime import datetime
 
-from hardware import (
-    find_arduino, connect, close,
-    send_dac, read_adc,
-    convert_voltage, convert_current,
-    send_and_read
-)
+from hardware import send_dac, convert_voltage, convert_current, send_and_read
 
 
 # ── Run one sweep segment ─────────────────────────────────────────────────────
@@ -148,7 +143,8 @@ def save_data(times, voltages, currents, params):
       - CV_TIMESTAMP_data.csv
     """
     timestamp = datetime.now().strftime("%d_%m_%Y__%H_%M_%S")
-    folder    = os.path.join("data", f"CV_{timestamp}")
+    BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    folder    = os.path.join(BASE_DIR,"data", f"CV_{timestamp}")
     os.makedirs(folder, exist_ok=True)
 
     meta_path = os.path.join(folder, f"CV_{timestamp}_metadata.txt")
@@ -170,7 +166,7 @@ def save_data(times, voltages, currents, params):
         writer = csv.writer(f)
         writer.writerow(["Time (s)", "Voltage (V)", "Current (mA)"])
         for t, v, i in zip(times, voltages, currents):
-            writer.writerow([round(t, 4), round(v, 6), round(i * 1000, 6)])
+            writer.writerow([round(t, 4), round(v, 6), round(i, 6)])
 
     print(f"Data saved to {folder}")
     return folder

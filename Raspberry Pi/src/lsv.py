@@ -102,7 +102,8 @@ def save_data(times, voltages, currents, params):
     Saves metadata and CSV data to a timestamped folder inside data/.
     """
     timestamp = datetime.now().strftime("%d_%m_%Y__%H_%M_%S")
-    folder    = os.path.join("data", f"LSV_{timestamp}")
+    BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    folder    = os.path.join(BASE_DIR,"data", f"LSV_{timestamp}")
     os.makedirs(folder, exist_ok=True)
 
     meta_path = os.path.join(folder, f"LSV_{timestamp}_metadata.txt")
@@ -121,7 +122,7 @@ def save_data(times, voltages, currents, params):
         writer = csv.writer(f)
         writer.writerow(["Time (s)", "Voltage (V)", "Current (mA)"])
         for t, v, i in zip(times, voltages, currents):
-            writer.writerow([round(t, 4), round(v, 6), round(i * 1000, 6)])
+            writer.writerow([round(t, 4), round(v, 6), round(i, 6)])
 
     print(f"Data saved to {folder}")
     return folder

@@ -55,11 +55,11 @@ except ImportError as e:
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-VIRTUAL_GND  = 2.5      # volts — physical midpoint of the circuit
-V_REF        = 5.0      # volts — supply voltage
+VIRTUAL_GND  = 2.575      # volts — physical midpoint of the circuit
+V_REF        = 5.157      # volts — supply voltage
 DAC_BITS     = 4095     # 12-bit DAC max value
 DAC_CS_PIN   = 8        # GPIO 8 = CE0 — chip select for MCP4921
-ADC_AVERAGE  = 16       # number of ADS1115 readings to average per point
+ADC_AVERAGE  = 10       # number of ADS1115 readings to average per point
 ADC_GAIN     = 2/3      # ADS1115 PGA ±6.144V — covers full 0-5V range
 
 
@@ -89,8 +89,8 @@ class RPiBoard:
         ads.gain = ADC_GAIN             # ±6.144V range
         ads.data_rate = 860             # maximum sample rate (860 SPS)
 
-        self.chan_re  = AnalogIn(ads, ADS.P0)   # A0 — RE buffer voltage
-        self.chan_tia = AnalogIn(ads, ADS.P1)   # A1 — TIA output voltage
+        self.chan_re  = AnalogIn(ads, 0)   # A0 — RE buffer voltage
+        self.chan_tia = AnalogIn(ads, 1)   # A1 — TIA output voltage
 
     def reset_input_buffer(self):
         """No-op — exists for compatibility with Arduino version."""
