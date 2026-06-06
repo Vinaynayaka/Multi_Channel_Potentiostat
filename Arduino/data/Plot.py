@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 # =========================
 # USER INPUT: CSV FILE PATH
 # =========================
-csv_file_path = r"V:\New folder\Multi_Channel_Potentiostat\data\CV_20260529_171124\CV_20260529_171124_data.csv"     # <-- CHANGE THIS
+csv_file_path = r"V:\New folder\Multi_Channel_Potentiostat\Arduino\data\CV_29_05_2026__17_37_15\CV_29_05_2026__17_37_15_data.csv"     # <-- CHANGE THIS
 
 # =========================
 # READ CSV FILE
@@ -13,7 +13,7 @@ data = pd.read_csv(csv_file_path)
 
 time = data["Time (s)"]
 voltage = data["Voltage (V)"]
-current = data["Current (A)"] 
+current = data["Current (mA)"] 
 
 # =========================
 # 1. Voltage vs Current (CV)

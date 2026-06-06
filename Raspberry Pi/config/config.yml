@@ -1,46 +1,46 @@
-# ──────────────────────────────────────────────────────────────────────────────
-# Multi-Channel Potentiostat — Configuration File
-# ──────────────────────────────────────────────────────────────────────────────
-# Edit this file to set experiment parameters before each run.
-# Hardware constants (shunt resistor etc.) are fixed and live in hardware.py.
-# Only experiment-specific parameters go here.
+# ── Experiment to run ──────────────────────────────────────────────────────────
+experiment: CV          # CV | LSV | CA
 
-
-# ── Select which experiment to run ────────────────────────────────────────────
-# Options: CV | LSV | CA
-experiment: CV
-
-
-# ── Cyclic Voltammetry (CV) ───────────────────────────────────────────────────
-cv:
-  start_voltage:  0.5     # V  — starting voltage
-  vertex_1:       1.0     # V  — first turnover voltage
-  vertex_2:       0     # V  — second turnover voltage
-  end_voltage:    0.5     # V  — final voltage (usually same as start)
-  sweep_rate:     50      # mV/s
-  cycles:         2       # number of complete cycles
-  rest_time:      2.0     # seconds to hold at start voltage before sweep
-  steps_per_volt: 100     # data point density — same across all segments
-
-
-# ── Linear Sweep Voltammetry (LSV) ────────────────────────────────────────────
-lsv:
-  start_voltage:  0.0     # V
-  end_voltage:    1.0     # V
-  sweep_rate:     100     # mV/s
-  rest_time:      2.0     # seconds
-  steps_per_volt: 150     # data point density
-
-
-# ── Chronoamperometry (CA) ────────────────────────────────────────────────────
-ca:
-  voltage:        -1     # V  — step voltage to hold at
-  duration:       30      # seconds
-  rest_time:      2.0     # seconds to hold at 0V before stepping
-  data_points:    150     # total number of readings over the duration
-
-
-# ── Hardware constants (do not change unless you swap components) ─────────────
+# ── Hardware ───────────────────────────────────────────────────────────────────
+# ONLY edit physical values here. All derived values (dE, data_points,
+# pts/s) are computed automatically by main.py. Never put derived values
+# back into this file.
 hardware:
-  r_shunt:        214.0  # ohms — TIA feedback resistor on JUAMI board
-  virtual_ground: 2.5     # V    — physical midpoint of circuit
+  r_shunt    : 214     # Ω  — TIA feedback / shunt resistor
+  adc_samples: 10       # ADC readings averaged per point (1–20)
+                        # higher → less noise, slower per point
+                        # t_meas = 5 + adc_samples × 3.4 ms (100 kHz I²C)
+  live_plot  : true     # true = live plot  |  false = best timing / headless
+  dt         : 0.100    # s  — MASTER sampling interval
+                        # must be > t_meas (main.py validates this)
+                        # CV/LSV: dE = sweep_rate × dt  (≥ 1.259 mV DAC LSB)
+                        # CA    : time_step = dt
+                        #
+                        # Quick selection guide:
+                        #   adc_samples=10 → dt ≥ 0.040 s  (safe: 0.100 s)
+                        #   adc_samples= 5 → dt ≥ 0.023 s  (safe: 0.050 s)
+                        #   adc_samples= 2 → dt ≥ 0.012 s  (safe: 0.025 s)
+
+# ── CV parameters ──────────────────────────────────────────────────────────────
+cv:
+  start_voltage : 0.0   # V
+  vertex_1      : 0.5   # V
+  vertex_2      : -0.5  # V
+  end_voltage   : 0.0   # V
+  sweep_rate    : 50    # mV/s
+  cycles        : 3
+  rest_time     : 5.0   # s
+
+# ── LSV parameters ─────────────────────────────────────────────────────────────
+lsv:
+  start_voltage : 0.0   # V
+  end_voltage   : 1.0   # V
+  sweep_rate    : 50    # mV/s
+  rest_time     : 5.0   # s
+
+# ── CA parameters ──────────────────────────────────────────────────────────────
+ca:
+  voltage   : 0.5       # V  — step voltage
+  duration  : 60.0      # s
+  rest_time : 5.0       # s
+  # data_points is derived: round(duration / dt) — do NOT enter manually
