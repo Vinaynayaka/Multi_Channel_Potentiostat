@@ -95,8 +95,8 @@ class RPiBoard:
         ads.gain = ADC_GAIN
         ads.data_rate = 860
 
-        self.chan_re  = AnalogIn(ads, ADS.P0)   # A0 — RE voltage
-        self.chan_tia = AnalogIn(ads, ADS.P1)   # A1 — TIA voltage
+        self.chan_re  = AnalogIn(ads, 0)   # A0 — RE voltage    Replaced ADS.P0 with 0
+        self.chan_tia = AnalogIn(ads, 1)   # A1 — TIA voltage    Replaced ADS.P1 with 1
 
     def reset_input_buffer(self):   pass   # compatibility stub
     def reset_output_buffer(self):  pass   # compatibility stub
