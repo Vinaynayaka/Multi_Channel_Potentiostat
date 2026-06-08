@@ -1,44 +1,39 @@
 """
 hardware.py  —  Raspberry Pi Hardware Layer
 ============================================
-RPi potentiostat: MCP4921 12-bit DAC (SPI) + ADS1115 16-bit ADC (I2C)
+Replaces Arduino serial communication with direct RPi hardware:
+  - MCP4921 DAC via SPI (same chip as Arduino version)
+  - ADS1115 16-bit ADC via I2C (replaces Arduino's 10-bit ADC)
+
+Same function signatures as the Arduino hardware.py so cv.py, lsv.py,
+ca.py and main.py work without changes.
 
 Virtual ground : 2.5V physical = 0V electrochemical
-DAC            : MCP4921  — SPI0, CE0 (GPIO 8)
-ADC            : ADS1115  — I2C1, address 0x48, 860 SPS
+DAC            : MCP4921 12-bit SPI
+ADC            : ADS1115 16-bit I2C (±6.144V range to cover full 0-5V)
 
-Wiring
-------
+Wiring:
   MCP4921
-    VDD, VREF → 5 V       VSS → GND
-    CS  → GPIO 8 (CE0)    SCK → GPIO 11 (SCLK)
-    SDI → GPIO 10 (MOSI)  LDAC → GND
+    VDD  -> 5V
+    VSS  -> GND
+    CS   -> GPIO 8  (CE0, SPI0)
+    SCK  -> GPIO 11 (SCLK, SPI0)
+    SDI  -> GPIO 10 (MOSI, SPI0)
+    LDAC -> GND     (DAC latches immediately on CS rising edge)
+    VREF -> 5V
 
-  ADS1115
-    VDD → 5 V             GND → GND
-    SCL → GPIO 3 (I2C1)   SDA → GPIO 2 (I2C1)
-    ADDR → GND (0x48)     A0  → RE buffer    A1 → TIA output
+  ADS1115 (powered at 5V, I2C level-shifted to 3.3V)
+    VDD  -> 5V
+    GND  -> GND
+    SCL  -> GPIO 3  (SCL, I2C1) via level shifter
+    SDA  -> GPIO 2  (SDA, I2C1) via level shifter
+    ADDR -> GND     (I2C address = 0x48)
+    A0   -> RE buffer output
+    A1   -> TIA output (current voltage)
 
-  Level shifters
-    SPI  (3.3V→5V) : 74AHCT125 unidirectional (MOSI, SCLK, CE0)
-    I2C  (3.3V↔5V) : BSS138-based bidirectional (SDA, SCL)
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Data Rate Reference
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-t_meas = 5 + adc_samples × 3.4  ms   (100 kHz I²C, both channels)
-t_meas = 5 + adc_samples × 2.64 ms   (400 kHz I²C)
-
-  adc_samples │  t_meas (100kHz) │  max pts/s
- ─────────────┼──────────────────┼────────────
-       1      │     8.4 ms       │   119
-       5      │    22.0 ms       │    45
-      10      │    39.0 ms       │    26
-      20      │    73.0 ms       │    14
-
-dt (from config) must be strictly greater than t_meas.
-dE  = sweep_rate × dt  must be ≥ DAC_LSB (≈1.259 mV).
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Level shifters:
+  SPI (3.3V→5V)  : 74AHCT125 unidirectional  (MOSI, SCLK, CE0)
+  I2C (3.3V↔5V)  : BSS138-based bidirectional (SDA, SCL)
 """
 
 import time
@@ -58,48 +53,52 @@ except ImportError as e:
         "  pip install spidev RPi.GPIO adafruit-circuitpython-ads1x15"
     )
 
+# ── Constants ─────────────────────────────────────────────────────────────────
 
-# ── Calibration constants (edit only here, never in experiment files) ─────────
-
-VIRTUAL_GND  = 2.575    # V — physical voltage that maps to 0 V electrochemical
-V_REF        = 5.157    # V — DAC reference / supply voltage
-DAC_BITS     = 4095     # 12-bit full scale (2¹² − 1)
-DAC_CS_PIN   = 8        # GPIO 8 = CE0
-ADC_GAIN     = 2 / 3    # ADS1115 PGA ±6.144 V — covers full 0–5 V rail
-DAC_SETTLE_S = 0.005    # seconds to wait after DAC write before sampling ADC
-
-# Derived calibration values (read-only, used by main.py validation)
-DAC_LSB_V    = V_REF / DAC_BITS          # ≈ 1.259 mV — smallest DAC step
-ADC_LSB_V    = 6.144 / 32767             # ≈ 187.5 µV — smallest ADC step
+VIRTUAL_GND  = 2.575      # volts — physical midpoint of the circuit
+V_REF        = 5.157      # volts — supply voltage
+DAC_BITS     = 4095     # 12-bit DAC max value
+DAC_CS_PIN   = 8        # GPIO 8 = CE0 — chip select for MCP4921
+ADC_AVERAGE  = 10       # number of ADS1115 readings to average per point
+ADC_GAIN     = 2/3      # ADS1115 PGA ±6.144V — covers full 0-5V range
 
 
-# ── RPiBoard ──────────────────────────────────────────────────────────────────
+# ── RPiBoard class ────────────────────────────────────────────────────────────
 
 class RPiBoard:
     """
     Holds all hardware handles for the RPi potentiostat.
-    Passed as the first argument to every hardware function.
+    Passed as the first argument to all hardware functions,
+    replacing the serial.Serial object used in the Arduino version.
     """
 
     def __init__(self):
+        # GPIO
         GPIO.setmode(GPIO.BCM)
         GPIO.setup(DAC_CS_PIN, GPIO.OUT, initial=GPIO.HIGH)
 
+        # SPI for MCP4921 DAC
         self.spi = spidev.SpiDev()
-        self.spi.open(0, 0)
-        self.spi.max_speed_hz = 1_000_000
-        self.spi.mode = 0b00
+        self.spi.open(0, 0)             # SPI bus 0, device 0 (CE0)
+        self.spi.max_speed_hz = 1000000 # 1 MHz — safe for MCP4921
+        self.spi.mode = 0b00            # CPOL=0, CPHA=0
 
+        # I2C + ADS1115 for ADC
         i2c      = busio.I2C(rpi_board.SCL, rpi_board.SDA)
         ads      = ADS.ADS1115(i2c, address=0x48)
-        ads.gain = ADC_GAIN
-        ads.data_rate = 860
+        ads.gain = ADC_GAIN             # ±6.144V range
+        ads.data_rate = 860             # maximum sample rate (860 SPS)
 
-        self.chan_re  = AnalogIn(ads, 0)   # A0 — RE voltage    Replaced ADS.P0 with 0
-        self.chan_tia = AnalogIn(ads, 1)   # A1 — TIA voltage    Replaced ADS.P1 with 1
+        self.chan_re  = AnalogIn(ads, 0)   # A0 — RE buffer voltage
+        self.chan_tia = AnalogIn(ads, 1)   # A1 — TIA output voltage
 
-    def reset_input_buffer(self):   pass   # compatibility stub
-    def reset_output_buffer(self):  pass   # compatibility stub
+    def reset_input_buffer(self):
+        """No-op — exists for compatibility with Arduino version."""
+        pass
+
+    def reset_output_buffer(self):
+        """No-op — exists for compatibility with Arduino version."""
+        pass
 
     def close(self):
         self.spi.close()
@@ -109,14 +108,19 @@ class RPiBoard:
 # ── Connection ────────────────────────────────────────────────────────────────
 
 def connect():
-    """Initializes RPi SPI + I2C hardware. Returns RPiBoard."""
+    """
+    Initializes RPi SPI and I2C hardware.
+    Returns an RPiBoard object (replaces serial.Serial from Arduino version).
+
+    Returns
+    -------
+    board : RPiBoard
+    """
     print("Initializing RPi potentiostat hardware...")
     try:
         board = RPiBoard()
-        print("  SPI (MCP4921 DAC) → CE0, 1 MHz")
-        print("  I2C (ADS1115 ADC) → 0x48, 860 SPS, ±6.144 V")
-        print(f"  DAC LSB = {DAC_LSB_V*1000:.3f} mV")
-        print(f"  ADC LSB = {ADC_LSB_V*1e6:.1f} µV")
+        print("SPI (MCP4921 DAC) initialized on CE0.")
+        print("I2C (ADS1115 ADC) initialized at address 0x48.")
         print("Hardware ready.\n")
         return board
     except Exception as e:
@@ -124,10 +128,16 @@ def connect():
 
 
 def close(board):
-    """Returns DAC to 0 V then cleans up SPI and GPIO."""
-    print("Returning to 0 V and closing hardware...")
-    send_dac(board, 0.0)
-    time.sleep(0.5)
+    """
+    Returns DAC to virtual ground then cleans up SPI and GPIO.
+
+    Parameters
+    ----------
+    board : RPiBoard
+    """
+    print("Returning to virtual ground and closing hardware...")
+    send_and_read(board, 0.0)   # confirmed write + response
+    time.sleep(2)
     board.close()
     print("Hardware closed.")
 
@@ -136,8 +146,17 @@ def close(board):
 
 def voltage_to_dac(v_electrochem):
     """
-    Converts electrochemical voltage (−2.575 V to +2.582 V) to 12-bit integer.
-    Formula: dac = int( ((V_echem + V_gnd) / V_ref) × 4095 )
+    Converts electrochemical voltage to 12-bit DAC integer.
+
+    Formula: dac = int(((V + 2.5) / 5.0) * 4095)
+
+    Parameters
+    ----------
+    v_electrochem : float  (-2.5V to +2.5V)
+
+    Returns
+    -------
+    int : 0 to 4095
     """
     normalized = (v_electrochem + VIRTUAL_GND) / V_REF
     normalized = max(0.0, min(1.0, normalized))
@@ -147,13 +166,24 @@ def voltage_to_dac(v_electrochem):
 def send_dac(board, v_electrochem):
     """
     Sends voltage setpoint to MCP4921 via SPI.
-    MCP4921 16-bit word: [0][BUF][GA][SHDN][D11..D0]
-    Config: unbuffered VREF, 1× gain, output active.
+
+    MCP4921 16-bit command:
+      Bit 15   : 0 = Channel A
+      Bit 14   : 0 = Unbuffered VREF
+      Bit 13   : 1 = 1x gain
+      Bit 12   : 1 = DAC active
+      Bits 11-0: 12-bit value
+
+    Parameters
+    ----------
+    board         : RPiBoard
+    v_electrochem : float
     """
-    dac_val   = voltage_to_dac(v_electrochem)
-    command   = 0x3000 | (dac_val & 0x0FFF)
+    dac_value = voltage_to_dac(v_electrochem)
+    command   = 0x3000 | (dac_value & 0x0FFF)
     high_byte = (command >> 8) & 0xFF
-    low_byte  =  command       & 0xFF
+    low_byte  =  command & 0xFF
+
     GPIO.output(DAC_CS_PIN, GPIO.LOW)
     board.spi.xfer2([high_byte, low_byte])
     GPIO.output(DAC_CS_PIN, GPIO.HIGH)
@@ -161,59 +191,70 @@ def send_dac(board, v_electrochem):
 
 # ── ADC ───────────────────────────────────────────────────────────────────────
 
-def send_and_read(board, v_electrochem, n_samples=10):
+def send_and_read(board, v_electrochem):
     """
-    Sends DAC setpoint, waits for settle, then reads both ADS1115
-    channels n_samples times each.
+    Sends DAC setpoint then reads ADS1115 channels A0 and A1.
+    Averages ADC_AVERAGE readings per channel to reduce noise.
 
     Parameters
     ----------
     board         : RPiBoard
-    v_electrochem : float   target electrochemical voltage (V)
-    n_samples     : int     readings per channel per call
-                            t_meas ≈ 5 + n_samples × 3.4 ms  (100 kHz I²C)
+    v_electrochem : float
 
     Returns
     -------
-    v_a0_avg : float          averaged A0 physical voltage (V)
-    v_a2_avg : float          averaged A1 physical voltage (V)
-    raw_a0   : list[float]    all n_samples A0 readings (V)  — physical
-    raw_a2   : list[float]    all n_samples A1 readings (V)  — physical
-
-    Note
-    ----
-    raw_a0 and raw_a2 hold raw physical voltages (0–5 V).
-    Convert using convert_voltage() and convert_current() to obtain
-    electrochemical voltage and current for each individual sample.
-    These conversions are performed in save_data() so every row in
-    the raw-ADC CSV carries both physical AND electrochemical values.
+    v_a0       : float       — averaged RE  voltage (physical, 0-5V)
+    v_a2       : float       — averaged TIA voltage (physical, 0-5V)
+    re_samples : list[float] — individual RE  readings before averaging
+    tia_samples: list[float] — individual TIA readings before averaging
     """
     send_dac(board, v_electrochem)
-    time.sleep(DAC_SETTLE_S)
+    time.sleep(0.005)               # DAC settle time
 
-    raw_a0 = [board.chan_re.voltage  for _ in range(n_samples)]
-    raw_a2 = [board.chan_tia.voltage for _ in range(n_samples)]
+    re_samples  = []
+    tia_samples = []
 
-    v_a0_avg = sum(raw_a0) / n_samples
-    v_a2_avg = sum(raw_a2) / n_samples
+    for _ in range(ADC_AVERAGE):
+        re_samples.append(board.chan_re.voltage)
+        tia_samples.append(board.chan_tia.voltage)
 
-    return v_a0_avg, v_a2_avg, raw_a0, raw_a2
+    v_a0 = sum(re_samples)  / ADC_AVERAGE
+    v_a2 = sum(tia_samples) / ADC_AVERAGE
 
+    return v_a0, v_a2, re_samples, tia_samples
 
-# ── Signal conversion ─────────────────────────────────────────────────────────
 
 def convert_voltage(v_a0_physical):
     """
-    Converts A0 physical voltage to electrochemical voltage.
-    Formula: V_echem = −(V_A0 − V_gnd)
-    The JUAMI op-amp buffer inverts the RE signal.
+    Converts raw A0 physical voltage to electrochemical voltage.
+    Op-amp buffer in JUAMI inverts the RE signal.
+
+    Formula: V_electrochem = -(V_physical - 2.5)
+
+    Parameters
+    ----------
+    v_a0_physical : float  (0 to 5V)
+
+    Returns
+    -------
+    float : electrochemical voltage in volts
     """
     return -(v_a0_physical - VIRTUAL_GND)
 
 
 def convert_current(v_a2_physical, r_shunt):
     """
-    Converts A1 (TIA) physical voltage to current in amperes.
-    Formula: I = (V_A1 − V_gnd) / R_shunt
+    Converts raw A1 (TIA) physical voltage to current in amperes.
+
+    Formula: I = (V_tia - 2.5) / R_shunt
+
+    Parameters
+    ----------
+    v_a2_physical : float  (0 to 5V)
+    r_shunt       : float  (ohms)
+
+    Returns
+    -------
+    float : current in amperes
     """
     return (v_a2_physical - VIRTUAL_GND) / r_shunt
