@@ -6,7 +6,7 @@ experiment: CV          # CV | LSV | CA
 # pts/s) are computed automatically by main.py. Never put derived values
 # back into this file.
 hardware:
-  r_shunt    : 214     # Ω  — TIA feedback / shunt resistor
+  r_shunt    : 217.8     # Ω  — TIA feedback / shunt resistor
   adc_samples: 10       # ADC readings averaged per point (1–20)
                         # higher → less noise, slower per point
                         # t_meas = 5 + adc_samples × 3.4 ms (100 kHz I²C)

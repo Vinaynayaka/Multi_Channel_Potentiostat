@@ -55,8 +55,8 @@ except ImportError as e:
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-VIRTUAL_GND  = 2.575      # volts — physical midpoint of the circuit
-V_REF        = 5.157      # volts — supply voltage
+VIRTUAL_GND  = 2.578      # volts — physical midpoint of the circuit
+V_REF        = 5.158      # volts — supply voltage
 DAC_BITS     = 4095     # 12-bit DAC max value
 DAC_CS_PIN   = 8        # GPIO 8 = CE0 — chip select for MCP4921
 ADC_AVERAGE  = 10       # number of ADS1115 readings to average per point
