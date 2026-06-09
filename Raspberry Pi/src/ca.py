@@ -4,6 +4,21 @@ ca.py  —  Chronoamperometry Experiment
 Steps to a fixed voltage and holds it for a set duration.
 Records current vs time.
 Imports all hardware communication from hardware.py.
+
+data_points is AUTO-CALCULATED from duration and sample_interval_ms.
+You never set data_points manually.
+
+  Formula: data_points = (duration_s × 1000) / sample_interval_ms
+
+  Example:
+    30s duration + 100ms interval → 300 data points
+    60s duration + 100ms interval → 600 data points
+
+Saved files:
+  CA_TIMESTAMP_metadata.txt
+  CA_TIMESTAMP_processed.csv  — Time, Set Voltage, Voltage, Current (averaged)
+  CA_TIMESTAMP_raw.csv        — Time, Point Index, Sample Index,
+                                Set Voltage, Voltage_raw, Current_raw
 """
 
 import time
@@ -24,79 +39,97 @@ def run_ca(ser, params):
 
     Parameters
     ----------
-    ser    : serial.Serial / RPiBoard
-    params : dict — CA parameters from config.yml
+    ser    : RPiBoard
+    params : dict — from config.yml ca section + hardware section values
+
+    Required keys in params
+    -----------------------
+    voltage             : float (V)  — step voltage to hold
+    duration            : float (s)  — how long to hold
+    rest_time           : float (s)  — equilibration at 0V before step
+    sample_interval_ms  : float      — from hardware config, auto-calculates points
+    r_shunt             : float (ohms)
+    adc_samples         : int        — from hardware config
 
     Returns
     -------
-    times, set_voltages, voltages, currents : lists  (processed)
+    times, set_voltages, voltages, currents : lists  (processed, averaged)
     raw_data : list of tuples
         (time, point_idx, sample_idx, set_voltage, voltage_raw, current_raw)
     """
-    voltage     = params["voltage"]
-    duration    = params["duration"]
-    rest_time   = params["rest_time"]
-    data_points = params["data_points"]
-    r_shunt     = params["r_shunt"]
+    voltage            = params["voltage"]
+    duration           = params["duration"]
+    rest_time          = params["rest_time"]
+    sample_interval_ms = params["sample_interval_ms"]
+    r_shunt            = params["r_shunt"]
+    adc_samples        = params["adc_samples"]
 
-    time_step = duration / data_points   # seconds between each reading
+    # Auto-calculate data_points from duration and sample interval
+    data_points = int((duration * 1000) / sample_interval_ms)
+    time_step   = duration / data_points   # seconds between readings
 
-    # Live plot setup
+    print(f"  Sample interval : {sample_interval_ms} ms")
+    print(f"  Data points     : {data_points}  (auto-calculated)")
+    print(f"  ADC samples     : {adc_samples} per point")
+
+    # Live plot
     plt.ion()
     fig, ax = plt.subplots()
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Current (mA)")
-    ax.set_title(f"Chronoamperometry — Live  ({voltage}V)")
+    ax.set_title(f"Chronoamperometry — Live  ({voltage} V)")
     ax.axhline(0, color="gray", linewidth=0.5)
     line, = ax.plot([], [], "g-", linewidth=1.5)
     plt.tight_layout()
 
     times, set_voltages, voltages, currents = [], [], [], []
-    raw_data = []   # (time, point_idx, sample_idx, set_voltage, v_raw, i_raw)
+    raw_data = []
 
-    # Rest at 0V before stepping
-    print(f"Resting at 0V for {rest_time}s...")
+    # Rest at 0V — equilibration before step
+    print(f"\nResting at 0V for {rest_time}s...")
     send_dac(ser, 0.0)
     time.sleep(rest_time)
     ser.reset_input_buffer()
 
-    # Step to target voltage and start timing
+    # Step to target voltage
     print(f"Stepping to {voltage}V, holding for {duration}s...")
     exp_start_time = time.time()
 
     for i in range(data_points):
+        # Absolute target time for this reading — prevents timing drift
         target_time = exp_start_time + (i + 1) * time_step
 
-        # Send target voltage and read response (averaged + raw samples)
-        v_a0, v_a2, re_samples, tia_samples = send_and_read(ser, voltage)
+        v_a0, v_a2, re_samples, tia_samples = send_and_read(
+            ser, voltage, adc_samples
+        )
         if v_a0 is None:
             continue
 
         elapsed = time.time() - exp_start_time
 
-        # ── Processed data ────────────────────────────────────────────────
+        # ── Processed (averaged) ─────────────────────────────────────────
         v_meas = convert_voltage(v_a0)
         i_meas = convert_current(v_a2, r_shunt)
 
         times.append(elapsed)
         set_voltages.append(voltage)
         voltages.append(v_meas)
-        currents.append(i_meas * 1000.0)
+        currents.append(i_meas * 1000.0)   # A → mA
 
-        # ── Raw data — one row per ADC sample ────────────────────────────
+        # ── Raw — one row per ADC sample ─────────────────────────────────
         for s_idx, (re_s, tia_s) in enumerate(zip(re_samples, tia_samples)):
             v_raw = convert_voltage(re_s)
             i_raw = convert_current(tia_s, r_shunt) * 1000.0
             raw_data.append((elapsed, i, s_idx, voltage, v_raw, i_raw))
 
-        # Update live plot
+        # Live plot
         line.set_xdata(times)
         line.set_ydata(currents)
         line.axes.relim()
         line.axes.autoscale_view()
         plt.pause(0.001)
 
-        # Wait until next scheduled reading
+        # Absolute timing — prevents drift over long experiments
         wait = target_time - time.time()
         if wait > 0:
             time.sleep(wait)
@@ -110,30 +143,51 @@ def run_ca(ser, params):
 
 def save_data(times, set_voltages, voltages, currents, raw_data, params):
     """
-    Saves metadata, a processed CSV, and a raw CSV to a timestamped folder
-    inside data/.
+    Creates a timestamped folder inside data/ and saves 3 files:
 
-    Processed CSV columns : Time (s), Set Voltage (V), Voltage (V), Current (mA)
-    Raw CSV columns       : Time (s), Point Index, Sample Index,
-                            Set Voltage (V), Voltage_raw (V), Current_raw (mA)
+    1. CA_TIMESTAMP_metadata.txt
+         Experiment type, date/time, all parameters.
+
+    2. CA_TIMESTAMP_processed.csv
+         Averaged values — one row per data point.
+         Columns: Time (s), Set Voltage (V), Voltage (V), Current (mA)
+
+    3. CA_TIMESTAMP_raw.csv
+         Non-averaged — one row per individual ADC sample.
+         Columns: Time (s), Point Index, Sample Index,
+                  Set Voltage (V), Voltage_raw (V), Current_raw (mA)
     """
     timestamp = datetime.now().strftime("%d_%m_%Y__%H_%M_%S")
     BASE_DIR  = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     folder    = os.path.join(BASE_DIR, "data", f"CA_{timestamp}")
     os.makedirs(folder, exist_ok=True)
 
-    # ── Metadata ──────────────────────────────────────────────────────────
+    # Auto-recalculate data_points for metadata (same formula as run_ca)
+    sample_interval_ms = params["sample_interval_ms"]
+    data_points = int((params["duration"] * 1000) / sample_interval_ms)
+
+    # ── 1. Metadata ───────────────────────────────────────────────────────
     meta_path = os.path.join(folder, f"CA_{timestamp}_metadata.txt")
     with open(meta_path, "w") as f:
-        f.write("Experiment: CA\n")
-        f.write(f"Date        : {datetime.now().strftime('%d-%m-%Y')}\n")
-        f.write(f"Time        : {datetime.now().strftime('%H:%M:%S')}\n")
-        f.write(f"Voltage     : {params['voltage']} V\n")
-        f.write(f"Duration    : {params['duration']} s\n")
-        f.write(f"Rest Time   : {params['rest_time']} s\n")
-        f.write(f"Data Points : {params['data_points']}\n")
+        f.write("Experiment        : CA (Chronoamperometry)\n")
+        f.write(f"Date              : {datetime.now().strftime('%d-%m-%Y')}\n")
+        f.write(f"Time              : {datetime.now().strftime('%H:%M:%S')}\n")
+        f.write("─" * 40 + "\n")
+        f.write("Experiment Parameters\n")
+        f.write("─" * 40 + "\n")
+        f.write(f"Voltage           : {params['voltage']} V\n")
+        f.write(f"Duration          : {params['duration']} s\n")
+        f.write(f"Rest Time         : {params['rest_time']} s\n")
+        f.write("─" * 40 + "\n")
+        f.write("Hardware Calibration\n")
+        f.write("─" * 40 + "\n")
+        f.write(f"Sample Interval   : {params['sample_interval_ms']} ms\n")
+        f.write(f"R_shunt           : {params['r_shunt']} ohms\n")
+        f.write(f"ADC Samples       : {params['adc_samples']} per point\n")
+        f.write("─" * 40 + "\n")
+        f.write(f"Total Data Points : {data_points}\n")
 
-    # ── Processed CSV ─────────────────────────────────────────────────────
+    # ── 2. Processed CSV (averaged values) ────────────────────────────────
     proc_path = os.path.join(folder, f"CA_{timestamp}_processed.csv")
     with open(proc_path, "w", newline="") as f:
         writer = csv.writer(f)
@@ -141,7 +195,7 @@ def save_data(times, set_voltages, voltages, currents, raw_data, params):
         for t, sv, v, i in zip(times, set_voltages, voltages, currents):
             writer.writerow([round(t, 4), round(sv, 6), round(v, 6), round(i, 6)])
 
-    # ── Raw CSV ───────────────────────────────────────────────────────────
+    # ── 3. Raw CSV (non-averaged, per ADC sample) ─────────────────────────
     raw_path = os.path.join(folder, f"CA_{timestamp}_raw.csv")
     with open(raw_path, "w", newline="") as f:
         writer = csv.writer(f)
@@ -150,8 +204,8 @@ def save_data(times, set_voltages, voltages, currents, raw_data, params):
             "Set Voltage (V)", "Voltage_raw (V)", "Current_raw (mA)"
         ])
         for (t, pt, sm, sv, vr, ir) in raw_data:
-            writer.writerow([round(t, 4), pt, sm, round(sv, 6),
-                             round(vr, 6), round(ir, 6)])
+            writer.writerow([round(t, 4), pt, sm,
+                             round(sv, 6), round(vr, 6), round(ir, 6)])
 
     print(f"Data saved to {folder}")
     return folder

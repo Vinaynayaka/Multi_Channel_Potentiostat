@@ -2,15 +2,15 @@
 hardware.py  —  Raspberry Pi Hardware Layer
 ============================================
 Replaces Arduino serial communication with direct RPi hardware:
-  - MCP4921 DAC via SPI (same chip as Arduino version)
-  - ADS1115 16-bit ADC via I2C (replaces Arduino's 10-bit ADC)
+  - MCP4921 DAC via SPI (sets voltage)
+  - ADS1115 16-bit ADC via I2C (reads voltage and current)
 
 Same function signatures as the Arduino hardware.py so cv.py, lsv.py,
 ca.py and main.py work without changes.
 
 Virtual ground : 2.5V physical = 0V electrochemical
 DAC            : MCP4921 12-bit SPI
-ADC            : ADS1115 16-bit I2C (±6.144V range to cover full 0-5V)
+ADC            : ADS1115 16-bit I2C (±6.144V range to cover full 0–5V)
 
 Wiring:
   MCP4921
@@ -53,14 +53,14 @@ except ImportError as e:
         "  pip install spidev RPi.GPIO adafruit-circuitpython-ads1x15"
     )
 
+
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-VIRTUAL_GND  = 2.578      # volts — physical midpoint of the circuit
-V_REF        = 5.158      # volts — supply voltage
-DAC_BITS     = 4095     # 12-bit DAC max value
-DAC_CS_PIN   = 8        # GPIO 8 = CE0 — chip select for MCP4921
-ADC_AVERAGE  = 10       # number of ADS1115 readings to average per point
-ADC_GAIN     = 2/3      # ADS1115 PGA ±6.144V — covers full 0-5V range
+VIRTUAL_GND = 2.575     # volts — physical midpoint of the circuit
+V_REF       = 5.157     # volts — supply voltage
+DAC_BITS    = 4095      # 12-bit DAC max value
+DAC_CS_PIN  = 8         # GPIO 8 = CE0 — chip select for MCP4921
+ADC_GAIN    = 2/3       # ADS1115 PGA ±6.144V — covers full 0–5V range
 
 
 # ── RPiBoard class ────────────────────────────────────────────────────────────
@@ -68,8 +68,7 @@ ADC_GAIN     = 2/3      # ADS1115 PGA ±6.144V — covers full 0-5V range
 class RPiBoard:
     """
     Holds all hardware handles for the RPi potentiostat.
-    Passed as the first argument to all hardware functions,
-    replacing the serial.Serial object used in the Arduino version.
+    Passed as the first argument to all hardware functions.
     """
 
     def __init__(self):
@@ -79,18 +78,18 @@ class RPiBoard:
 
         # SPI for MCP4921 DAC
         self.spi = spidev.SpiDev()
-        self.spi.open(0, 0)             # SPI bus 0, device 0 (CE0)
-        self.spi.max_speed_hz = 1000000 # 1 MHz — safe for MCP4921
-        self.spi.mode = 0b00            # CPOL=0, CPHA=0
+        self.spi.open(0, 0)              # SPI bus 0, device 0 (CE0)
+        self.spi.max_speed_hz = 1_000_000  # 1 MHz — safe for MCP4921
+        self.spi.mode = 0b00             # CPOL=0, CPHA=0
 
         # I2C + ADS1115 for ADC
         i2c      = busio.I2C(rpi_board.SCL, rpi_board.SDA)
         ads      = ADS.ADS1115(i2c, address=0x48)
-        ads.gain = ADC_GAIN             # ±6.144V range
-        ads.data_rate = 860             # maximum sample rate (860 SPS)
+        ads.gain = ADC_GAIN              # ±6.144V range
+        ads.data_rate = 860              # maximum sample rate (860 SPS)
 
-        self.chan_re  = AnalogIn(ads, 0)   # A0 — RE buffer voltage
-        self.chan_tia = AnalogIn(ads, 1)   # A1 — TIA output voltage
+        self.chan_re  = AnalogIn(ads, 0)  # A0 — RE buffer voltage
+        self.chan_tia = AnalogIn(ads, 1)  # A1 — TIA output voltage
 
     def reset_input_buffer(self):
         """No-op — exists for compatibility with Arduino version."""
@@ -110,7 +109,7 @@ class RPiBoard:
 def connect():
     """
     Initializes RPi SPI and I2C hardware.
-    Returns an RPiBoard object (replaces serial.Serial from Arduino version).
+    Returns an RPiBoard object.
 
     Returns
     -------
@@ -136,7 +135,7 @@ def close(board):
     board : RPiBoard
     """
     print("Returning to virtual ground and closing hardware...")
-    send_and_read(board, 0.0)   # confirmed write + response
+    send_and_read(board, 0.0)
     time.sleep(2)
     board.close()
     print("Hardware closed.")
@@ -148,7 +147,7 @@ def voltage_to_dac(v_electrochem):
     """
     Converts electrochemical voltage to 12-bit DAC integer.
 
-    Formula: dac = int(((V + 2.5) / 5.0) * 4095)
+    Formula: dac = int(((V + VIRTUAL_GND) / V_REF) * 4095)
 
     Parameters
     ----------
@@ -182,7 +181,7 @@ def send_dac(board, v_electrochem):
     dac_value = voltage_to_dac(v_electrochem)
     command   = 0x3000 | (dac_value & 0x0FFF)
     high_byte = (command >> 8) & 0xFF
-    low_byte  =  command & 0xFF
+    low_byte  =  command       & 0xFF
 
     GPIO.output(DAC_CS_PIN, GPIO.LOW)
     board.spi.xfer2([high_byte, low_byte])
@@ -191,45 +190,52 @@ def send_dac(board, v_electrochem):
 
 # ── ADC ───────────────────────────────────────────────────────────────────────
 
-def send_and_read(board, v_electrochem):
+def send_and_read(board, v_electrochem, adc_samples=10):
     """
     Sends DAC setpoint then reads ADS1115 channels A0 and A1.
-    Averages ADC_AVERAGE readings per channel to reduce noise.
+    Averages `adc_samples` readings per channel to reduce noise.
+
+    adc_samples is configured once in config.yml under hardware.adc_samples.
+    It is passed in from the experiment functions — no hardcoded default
+    should be relied upon in normal operation.
 
     Parameters
     ----------
     board         : RPiBoard
     v_electrochem : float
+    adc_samples   : int — number of ADC readings to average (from config)
 
     Returns
     -------
-    v_a0       : float       — averaged RE  voltage (physical, 0-5V)
-    v_a2       : float       — averaged TIA voltage (physical, 0-5V)
-    re_samples : list[float] — individual RE  readings before averaging
-    tia_samples: list[float] — individual TIA readings before averaging
+    v_a0        : float        — averaged RE  voltage (physical, 0–5V)
+    v_a2        : float        — averaged TIA voltage (physical, 0–5V)
+    re_samples  : list[float]  — individual RE  readings before averaging
+    tia_samples : list[float]  — individual TIA readings before averaging
     """
     send_dac(board, v_electrochem)
-    time.sleep(0.005)               # DAC settle time
+    time.sleep(0.005)           # 5ms DAC settle time
 
     re_samples  = []
     tia_samples = []
 
-    for _ in range(ADC_AVERAGE):
+    for _ in range(adc_samples):
         re_samples.append(board.chan_re.voltage)
         tia_samples.append(board.chan_tia.voltage)
 
-    v_a0 = sum(re_samples)  / ADC_AVERAGE
-    v_a2 = sum(tia_samples) / ADC_AVERAGE
+    v_a0 = sum(re_samples)  / adc_samples
+    v_a2 = sum(tia_samples) / adc_samples
 
     return v_a0, v_a2, re_samples, tia_samples
 
+
+# ── Conversion ────────────────────────────────────────────────────────────────
 
 def convert_voltage(v_a0_physical):
     """
     Converts raw A0 physical voltage to electrochemical voltage.
     Op-amp buffer in JUAMI inverts the RE signal.
 
-    Formula: V_electrochem = -(V_physical - 2.5)
+    Formula: V_electrochem = -(V_physical - VIRTUAL_GND)
 
     Parameters
     ----------
@@ -246,7 +252,7 @@ def convert_current(v_a2_physical, r_shunt):
     """
     Converts raw A1 (TIA) physical voltage to current in amperes.
 
-    Formula: I = (V_tia - 2.5) / R_shunt
+    Formula: I = (V_tia - VIRTUAL_GND) / R_shunt
 
     Parameters
     ----------

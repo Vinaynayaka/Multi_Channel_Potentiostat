@@ -1,46 +1,54 @@
-# ── Experiment to run ──────────────────────────────────────────────────────────
-experiment: CV          # CV | LSV | CA
+# =============================================================================
+#  config.yml  —  Potentiostat Configuration
+# =============================================================================
+#
+#  Hardware section  : Calibrate ONCE, never touch again per experiment
+#  Experiment section: Only change sweep rate / voltage range / cycles
+#
+# =============================================================================
 
-# ── Hardware ───────────────────────────────────────────────────────────────────
-# ONLY edit physical values here. All derived values (dE, data_points,
-# pts/s) are computed automatically by main.py. Never put derived values
-# back into this file.
+
+# ── Hardware Calibration (one-time setup) ─────────────────────────────────────
+
 hardware:
-  r_shunt    : 217.8     # Ω  — TIA feedback / shunt resistor
-  adc_samples: 10       # ADC readings averaged per point (1–20)
-                        # higher → less noise, slower per point
-                        # t_meas = 5 + adc_samples × 3.4 ms (100 kHz I²C)
-  live_plot  : true     # true = live plot  |  false = best timing / headless
-  dt         : 0.100    # s  — MASTER sampling interval
-                        # must be > t_meas (main.py validates this)
-                        # CV/LSV: dE = sweep_rate × dt  (≥ 1.259 mV DAC LSB)
-                        # CA    : time_step = dt
-                        #
-                        # Quick selection guide:
-                        #   adc_samples=10 → dt ≥ 0.040 s  (safe: 0.100 s)
-                        #   adc_samples= 5 → dt ≥ 0.023 s  (safe: 0.050 s)
-                        #   adc_samples= 2 → dt ≥ 0.012 s  (safe: 0.025 s)
+  sample_interval_ms: 100     # Time between data points (ms) — calibrate once
+  r_shunt:           1000     # Shunt resistor (ohms)        — calibrate once
+  adc_samples:         10     # ADC readings averaged per point — calibrate once
 
-# ── CV parameters ──────────────────────────────────────────────────────────────
+
+# ── Select Experiment: CV, LSV, or CA ─────────────────────────────────────────
+
+experiment: CV
+
+
+# ── Cyclic Voltammetry ────────────────────────────────────────────────────────
+#   Change per experiment: start_voltage, vertex_1, vertex_2,
+#                          end_voltage, sweep_rate, cycles, rest_time
+
 cv:
-  start_voltage : 0.0   # V
-  vertex_1      : 0.5   # V
-  vertex_2      : -0.5  # V
-  end_voltage   : 0.0   # V
-  sweep_rate    : 50    # mV/s
-  cycles        : 3
-  rest_time     : 5.0   # s
+  start_voltage:   0.0        # V
+  vertex_1:        1.0        # V  (first turnover voltage)
+  vertex_2:       -1.0        # V  (second turnover voltage)
+  end_voltage:     0.0        # V
+  sweep_rate:    100          # mV/s
+  cycles:          3
+  rest_time:       2          # seconds — equilibration before sweep
 
-# ── LSV parameters ─────────────────────────────────────────────────────────────
+
+# ── Linear Sweep Voltammetry ──────────────────────────────────────────────────
+#   Change per experiment: start_voltage, end_voltage, sweep_rate, rest_time
+
 lsv:
-  start_voltage : 0.0   # V
-  end_voltage   : 1.0   # V
-  sweep_rate    : 50    # mV/s
-  rest_time     : 5.0   # s
+  start_voltage:   0.0        # V
+  end_voltage:     1.0        # V
+  sweep_rate:    100          # mV/s
+  rest_time:       2          # seconds
 
-# ── CA parameters ──────────────────────────────────────────────────────────────
+
+# ── Chronoamperometry ─────────────────────────────────────────────────────────
+#   Change per experiment: voltage, duration, rest_time
+
 ca:
-  voltage   : 0.5       # V  — step voltage
-  duration  : 60.0      # s
-  rest_time : 5.0       # s
-  # data_points is derived: round(duration / dt) — do NOT enter manually
+  voltage:         0.5        # V — step voltage
+  duration:       30          # seconds — how long to hold
+  rest_time:       2          # seconds — equilibration at 0V before step
