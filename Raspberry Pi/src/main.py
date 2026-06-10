@@ -10,7 +10,7 @@ Usage:
 Hardware calibration parameters (sample_interval_ms, r_shunt, adc_samples)
 are read once from config.yml and injected into experiment params automatically.
 You never need to touch these per experiment — only change experiment-specific
-parameters (voltages, sweep rate, cycles, duration).
+parameters (voltages, sweep rate, cycles, duration, rest_time).
 
 Config parameters per experiment:
   CV  : start_voltage, vertex_1, vertex_2, end_voltage, sweep_rate, cycles, rest_time
@@ -61,13 +61,14 @@ def main():
     print(f"    ADC Samples     : {adc_samples} per point")
     print(f"{'='*50}\n")
 
-    # Initialize RPi hardware (SPI + I2C)
-    board = connect()
+    # ── board = None guards against close() being called if connect() fails ──
+    board = None
 
     try:
+        board = connect()
+
         if exp_type == "CV":
             params = config["cv"]
-            # Inject hardware calibration into params
             params["sample_interval_ms"] = sample_interval_ms
             params["r_shunt"]            = r_shunt
             params["adc_samples"]        = adc_samples
@@ -86,7 +87,6 @@ def main():
 
         elif exp_type == "LSV":
             params = config["lsv"]
-            # Inject hardware calibration into params
             params["sample_interval_ms"] = sample_interval_ms
             params["r_shunt"]            = r_shunt
             params["adc_samples"]        = adc_samples
@@ -102,7 +102,6 @@ def main():
 
         elif exp_type == "CA":
             params = config["ca"]
-            # Inject hardware calibration into params
             params["sample_interval_ms"] = sample_interval_ms
             params["r_shunt"]            = r_shunt
             params["adc_samples"]        = adc_samples
@@ -123,7 +122,7 @@ def main():
 
     except KeyboardInterrupt:
         print("\nExperiment interrupted by user.")
-        print("Partial data not saved — add interrupt handling if needed.")
+        print("Partial data not saved.")
 
     except Exception as e:
         import traceback
@@ -131,7 +130,9 @@ def main():
         print(f"\nError: {e}")
 
     finally:
-        close(board)
+        # Only close hardware if it was successfully initialized
+        if board is not None:
+            close(board)
         plt.show()
 
 

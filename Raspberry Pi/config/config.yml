@@ -12,7 +12,7 @@
 
 hardware:
   sample_interval_ms: 100     # Time between data points (ms) — calibrate once
-  r_shunt:           1000     # Shunt resistor (ohms)        — calibrate once
+  r_shunt:           214     # Shunt resistor (ohms)        — calibrate once
   adc_samples:         10     # ADC readings averaged per point — calibrate once
 
 

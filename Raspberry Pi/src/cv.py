@@ -13,9 +13,9 @@ You never set steps_per_volt manually — only change sweep_rate per experiment.
   Formula: steps_per_volt = 1,000,000 / (sweep_rate_mV_s × sample_interval_ms)
 
   Example:
-    100 mV/s + 100ms → 100 steps/volt  (1 point every 100ms)
-     50 mV/s + 100ms → 200 steps/volt  (1 point every 100ms)
-    200 mV/s + 100ms →  50 steps/volt  (1 point every 100ms)
+    100 mV/s + 100ms → 100 steps/volt
+     50 mV/s + 100ms → 200 steps/volt
+    200 mV/s + 100ms →  50 steps/volt
 
 Saved files:
   CV_TIMESTAMP_metadata.txt
@@ -34,18 +34,34 @@ from datetime import datetime
 from hardware import send_dac, convert_voltage, convert_current, send_and_read
 
 
+# ── Plot throttle constant ────────────────────────────────────────────────────
+# All plot operations run at most every PLOT_INTERVAL_S seconds.
+# last_plot_time is passed between segments so throttle is continuous
+# across the entire CV experiment, not reset each segment.
+# Time-based (not count-based) — stays correct at any sample_interval_ms.
+
+PLOT_INTERVAL_S = 0.5   # refresh live plot twice per second
+
+
 # ── Run one sweep segment ─────────────────────────────────────────────────────
 
 def run_segment(ser, v_start, v_end, sweep_rate, steps_per_volt,
                 r_shunt, adc_samples, times, set_voltages, voltages,
-                currents, raw_data, exp_start_time, line):
+                currents, raw_data, exp_start_time, line, ax,
+                last_plot_time):
     """
     Sweeps from v_start to v_end at the given sweep rate.
-    Step count is auto-derived from sample_interval_ms (via steps_per_volt).
-    Timing is absolute so clock drift does not accumulate.
+    Appends processed and raw data in-place.
 
-    Appends to times, set_voltages, voltages, currents (processed) and
-    raw_data (per-sample rows) in-place.
+    Parameters
+    ----------
+    last_plot_time : float — passed in from previous segment so plot throttle
+                             is continuous across the whole CV experiment
+
+    Returns
+    -------
+    last_plot_time : float — updated, pass to next segment call
+    timing_misses  : int   — number of steps that exceeded timing budget
     """
     voltage_range  = abs(v_end - v_start)
     n_steps        = max(2, int(voltage_range * steps_per_volt))
@@ -53,17 +69,25 @@ def run_segment(ser, v_start, v_end, sweep_rate, steps_per_volt,
     step_voltages  = np.linspace(v_start, v_end, n_steps)
     step_times     = np.linspace(0, time_for_range, n_steps)
 
-    seg_start = time.time()
-    pt_offset = len(times)      # global point index across all segments
+    seg_start     = time.time()
+    pt_offset     = len(times)      # global point index across all segments
+    timing_misses = 0
 
     for idx, v_set in enumerate(step_voltages):
-        v_a0, v_a2, re_samples, tia_samples = send_and_read(
-            ser, v_set, adc_samples
-        )
-        if v_a0 is None:
+
+        # Hardware read — catch transient errors without crashing
+        try:
+            v_a0, v_a2, re_samples, tia_samples = send_and_read(
+                ser, v_set, adc_samples
+            )
+        except Exception as hw_err:
+            print(f"  ⚠ Hardware error at step {idx}: {hw_err} — skipping")
+            timing_misses += 1
             continue
 
-        elapsed = time.time() - exp_start_time
+        # Cache time.time() once — reused for elapsed and plot check
+        now     = time.time()
+        elapsed = now - exp_start_time
         pt_idx  = pt_offset + idx
 
         # ── Processed (averaged) ─────────────────────────────────────────
@@ -81,19 +105,30 @@ def run_segment(ser, v_start, v_end, sweep_rate, steps_per_volt,
             i_raw = convert_current(tia_s, r_shunt) * 1000.0
             raw_data.append((elapsed, pt_idx, s_idx, v_set, v_raw, i_raw))
 
-        # Live plot
-        line.set_xdata(voltages)
-        line.set_ydata(currents)
-        line.axes.relim()
-        line.axes.autoscale_view()
-        plt.pause(0.001)
+        # ── Live plot — time-throttled ────────────────────────────────────
+        # ALL plot operations inside this block — relim() and autoscale_view()
+        # are heavy on RPi; running them every step breaks timing.
+        # last_plot_time is shared across segments for continuous throttling.
+        is_last = (idx == n_steps - 1)
+        if (now - last_plot_time >= PLOT_INTERVAL_S) or is_last:
+            line.set_xdata(voltages)
+            line.set_ydata(currents)
+            ax.relim()
+            ax.autoscale_view()
+            plt.pause(0.001)
+            last_plot_time = now
 
-        # Absolute timing — prevents drift over long experiments
+        # ── Absolute timing wait ──────────────────────────────────────────
+        # Recalculate AFTER potential plot overhead — always accurate
         if idx < n_steps - 1:
             target = seg_start + step_times[idx + 1]
             wait   = target - time.time()
             if wait > 0:
                 time.sleep(wait)
+            else:
+                timing_misses += 1
+
+    return last_plot_time, timing_misses
 
 
 # ── Main CV experiment ────────────────────────────────────────────────────────
@@ -109,11 +144,11 @@ def run_cv(ser, params):
 
     Required keys in params
     -----------------------
-    start_voltage, vertex_1, vertex_2, end_voltage   : float (V)
+    start_voltage, vertex_1, vertex_2, end_voltage : float (V)
     sweep_rate      : float  (mV/s)
     cycles          : int
     rest_time       : float  (s)
-    sample_interval_ms : float — from hardware config, auto-calculates steps
+    sample_interval_ms : float — from hardware config
     r_shunt         : float  (ohms)
     adc_samples     : int    — from hardware config
 
@@ -134,15 +169,14 @@ def run_cv(ser, params):
     r_shunt            = params["r_shunt"]
     adc_samples        = params["adc_samples"]
 
-    # Auto-calculate steps_per_volt from sweep rate and sample interval
-    # steps_per_volt = 1,000,000 / (sweep_rate_mV_s × sample_interval_ms)
+    # Auto-calculate steps_per_volt → 1 data point every sample_interval_ms
     steps_per_volt = 1_000_000 / (sweep_rate * sample_interval_ms)
 
     print(f"  Sample interval : {sample_interval_ms} ms")
     print(f"  Steps per volt  : {steps_per_volt:.1f}  (auto-calculated)")
     print(f"  ADC samples     : {adc_samples} per point")
 
-    # Live plot
+    # Live plot setup
     plt.ion()
     fig, ax = plt.subplots()
     ax.set_xlabel("Voltage (V)")
@@ -154,7 +188,8 @@ def run_cv(ser, params):
     plt.tight_layout()
 
     times, set_voltages, voltages, currents = [], [], [], []
-    raw_data = []
+    raw_data      = []
+    total_misses  = 0
 
     # Rest period — equilibration at start voltage
     print(f"\nResting at {start_voltage}V for {rest_time}s...")
@@ -163,25 +198,39 @@ def run_cv(ser, params):
     ser.reset_input_buffer()
 
     exp_start_time = time.time()
+    last_plot_time = exp_start_time   # shared across all segments and cycles
 
     for cycle in range(cycles):
         print(f"  Cycle {cycle + 1}/{cycles}")
 
         # Segment 1: start_voltage → vertex_1
-        run_segment(ser, start_voltage, vertex_1, sweep_rate, steps_per_volt,
-                    r_shunt, adc_samples, times, set_voltages, voltages,
-                    currents, raw_data, exp_start_time, line)
+        last_plot_time, m = run_segment(
+            ser, start_voltage, vertex_1, sweep_rate, steps_per_volt,
+            r_shunt, adc_samples, times, set_voltages, voltages,
+            currents, raw_data, exp_start_time, line, ax, last_plot_time
+        )
+        total_misses += m
 
         # Segment 2: vertex_1 → vertex_2
-        run_segment(ser, vertex_1, vertex_2, sweep_rate, steps_per_volt,
-                    r_shunt, adc_samples, times, set_voltages, voltages,
-                    currents, raw_data, exp_start_time, line)
+        last_plot_time, m = run_segment(
+            ser, vertex_1, vertex_2, sweep_rate, steps_per_volt,
+            r_shunt, adc_samples, times, set_voltages, voltages,
+            currents, raw_data, exp_start_time, line, ax, last_plot_time
+        )
+        total_misses += m
 
         # Segment 3: vertex_2 → end_voltage
-        run_segment(ser, vertex_2, end_voltage, sweep_rate, steps_per_volt,
-                    r_shunt, adc_samples, times, set_voltages, voltages,
-                    currents, raw_data, exp_start_time, line)
+        last_plot_time, m = run_segment(
+            ser, vertex_2, end_voltage, sweep_rate, steps_per_volt,
+            r_shunt, adc_samples, times, set_voltages, voltages,
+            currents, raw_data, exp_start_time, line, ax, last_plot_time
+        )
+        total_misses += m
 
+    # Report timing performance
+    if total_misses > 0:
+        print(f"  ⚠ {total_misses} timing miss(es) across all segments.")
+        print(f"    Consider increasing sample_interval_ms in config.yml.")
     print("CV complete.")
     plt.ioff()
     return times, set_voltages, voltages, currents, raw_data
@@ -194,7 +243,7 @@ def save_data(times, set_voltages, voltages, currents, raw_data, params):
     Creates a timestamped folder inside data/ and saves 3 files:
 
     1. CV_TIMESTAMP_metadata.txt
-         Experiment type, date/time, all parameters.
+         Experiment type, date/time, all parameters, computed values.
 
     2. CV_TIMESTAMP_processed.csv
          Averaged values — one row per data point.
@@ -205,35 +254,44 @@ def save_data(times, set_voltages, voltages, currents, raw_data, params):
          Columns: Time (s), Point Index, Sample Index,
                   Set Voltage (V), Voltage_raw (V), Current_raw (mA)
     """
-    timestamp = datetime.now().strftime("%d_%m_%Y__%H_%M_%S")
-    BASE_DIR  = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    folder    = os.path.join(BASE_DIR, "data", f"CV_{timestamp}")
+    # Capture datetime once — folder name and metadata stay consistent
+    now            = datetime.now()
+    timestamp      = now.strftime("%d_%m_%Y__%H_%M_%S")
+    BASE_DIR       = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    folder         = os.path.join(BASE_DIR, "data", f"CV_{timestamp}")
     os.makedirs(folder, exist_ok=True)
+
+    # Computed values for metadata
+    sample_interval_ms = params["sample_interval_ms"]
+    steps_per_volt     = 1_000_000 / (params["sweep_rate"] * sample_interval_ms)
 
     # ── 1. Metadata ───────────────────────────────────────────────────────
     meta_path = os.path.join(folder, f"CV_{timestamp}_metadata.txt")
     with open(meta_path, "w") as f:
-        f.write("Experiment        : CV (Cyclic Voltammetry)\n")
-        f.write(f"Date              : {datetime.now().strftime('%d-%m-%Y')}\n")
-        f.write(f"Time              : {datetime.now().strftime('%H:%M:%S')}\n")
-        f.write("─" * 40 + "\n")
+        f.write("Experiment           : CV (Cyclic Voltammetry)\n")
+        f.write(f"Date                 : {now.strftime('%d-%m-%Y')}\n")
+        f.write(f"Time                 : {now.strftime('%H:%M:%S')}\n")
+        f.write("─" * 45 + "\n")
         f.write("Experiment Parameters\n")
-        f.write("─" * 40 + "\n")
-        f.write(f"Start Voltage     : {params['start_voltage']} V\n")
-        f.write(f"Vertex 1          : {params['vertex_1']} V\n")
-        f.write(f"Vertex 2          : {params['vertex_2']} V\n")
-        f.write(f"End Voltage       : {params['end_voltage']} V\n")
-        f.write(f"Sweep Rate        : {params['sweep_rate']} mV/s\n")
-        f.write(f"Cycles            : {params['cycles']}\n")
-        f.write(f"Rest Time         : {params['rest_time']} s\n")
-        f.write("─" * 40 + "\n")
+        f.write("─" * 45 + "\n")
+        f.write(f"Start Voltage        : {params['start_voltage']} V\n")
+        f.write(f"Vertex 1             : {params['vertex_1']} V\n")
+        f.write(f"Vertex 2             : {params['vertex_2']} V\n")
+        f.write(f"End Voltage          : {params['end_voltage']} V\n")
+        f.write(f"Sweep Rate           : {params['sweep_rate']} mV/s\n")
+        f.write(f"Cycles               : {params['cycles']}\n")
+        f.write(f"Rest Time            : {params['rest_time']} s\n")
+        f.write("─" * 45 + "\n")
         f.write("Hardware Calibration\n")
-        f.write("─" * 40 + "\n")
-        f.write(f"Sample Interval   : {params['sample_interval_ms']} ms\n")
-        f.write(f"R_shunt           : {params['r_shunt']} ohms\n")
-        f.write(f"ADC Samples       : {params['adc_samples']} per point\n")
-        f.write("─" * 40 + "\n")
-        f.write(f"Total Data Points : {len(times)}\n")
+        f.write("─" * 45 + "\n")
+        f.write(f"Sample Interval      : {sample_interval_ms} ms\n")
+        f.write(f"R_shunt              : {params['r_shunt']} ohms\n")
+        f.write(f"ADC Samples          : {params['adc_samples']} per point\n")
+        f.write("─" * 45 + "\n")
+        f.write("Data Summary\n")
+        f.write("─" * 45 + "\n")
+        f.write(f"Steps per Volt (calc): {steps_per_volt:.1f}\n")
+        f.write(f"Data Points (actual) : {len(times)}\n")
 
     # ── 2. Processed CSV (averaged values) ────────────────────────────────
     proc_path = os.path.join(folder, f"CV_{timestamp}_processed.csv")
